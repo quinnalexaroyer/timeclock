@@ -1,0 +1,336 @@
+import tkinter as tk
+import datetime
+import sqlite3
+import os.path
+from tkinter import messagebox
+
+class ClockModel:
+    def __init__(self):
+        self.resetIntervals()
+        self.on = False
+        self.startTime = datetime.datetime.today()
+        self.dailyTotal = 0
+    def loadDatabase(self,dbfile): # If there is unsaved data, ask if it should be saved
+        newDB = False
+        if not os.path.isfile(dbfile):
+            newDB = True
+        self.conn = sqlite3.connect(dbfile)
+        self.c = self.conn.cursor()
+        if newDB:
+            self.newDatabase()
+        self.dailyTotal = self.getDailyTotal()
+        self.resetIntervals()
+    def pushClock(self,description):
+        if hasattr(self,"conn"):
+            if self.on:
+                descIdx = self.numDescriptions+1
+                if description in self.descriptions:
+                    descIdx = self.descriptions[description]
+                else:
+                    self.numDescriptions += 1
+                    self.descriptions[description] = self.numDescriptions
+                self.intervals.append((self.startTime, datetime.datetime.today(), descIdx))
+                self.dailyTotal += self.totalSeconds(self.intervals[-1][1]-self.intervals[-1][0])
+                self.on = False
+            else:
+                self.startTime = datetime.datetime.today()
+                self.on = True
+    def resetIntervals(self):
+        self.intervals = []
+        self.descriptions = {}
+        self.numDescriptions = 0
+    def save(self):
+        e = self.c.execute
+        f1 = self.c.fetchone
+        e("SELECT * FROM descriptions LIMIT 1")
+        descMax = 0
+        if f1() is not None:
+            e("SELECT MAX(ROWID) FROM descriptions")
+            descMax = f1()[0]
+        e("SELECT rowid,description FROM descriptions")
+        row = f1()
+        descIndices = [-1]*(len(self.descriptions)+1)
+        while row is not None:
+            if row[1] in self.descriptions:
+                descIndices[self.descriptions[row[1]]] = row[0]
+            row = f1()
+        for d in self.descriptions:
+            i = self.descriptions[d]
+            if descIndices[i] == -1:
+                e("INSERT INTO descriptions (rowid,description) VALUES (?,?)", (descMax+1,d))
+                descIndices[i] = descMax+1
+                descMax += 1
+        for i in self.intervals:
+            dt = i[1]-i[0]
+            e("INSERT INTO intervals (start,end,length,description) VALUES (?,?,?,?)", (i[0],i[1], self.totalSeconds(dt), descIndices[i[2]]))
+        self.conn.commit()
+        self.resetIntervals()
+    def totalSeconds(self,dt):
+        return 86400*dt.days+dt.seconds+dt.microseconds/1000000
+    def cancelInterval(self):
+        self.on = False
+    def newDatabase(self):
+        e = self.c.execute
+        e("CREATE TABLE descriptions (description TEXT)")
+        e("CREATE TABLE intervals (start DATETIME, end DATETIME, length REAL, description INTEGER, FOREIGN KEY(description) REFERENCES descriptions(rowid))")
+        e("CREATE INDEX description ON descriptions(description)")
+        e("CREATE INDEX start ON intervals(start)")
+        e("CREATE INDEX end ON intervals(end)")
+        e("CREATE INDEX descriptionKey ON intervals(description)")
+    def getDailyTotal(self):
+        e = self.c.execute
+        f1 = self.c.fetchone
+        today = datetime.date.today()
+        midnight = datetime.datetime(today.year, today.month, today.day, hour=0, minute=0, second=0, microsecond=0)
+        e("SELECT SUM(length) FROM intervals WHERE start > ?", (midnight,))
+        r = f1()
+        if r is not None and r[0] is not None:
+            return r[0]
+        else:
+            return 0
+
+class ClockView:
+    def __init__(self):
+        def cancelInterval():
+            self.model.cancelInterval()
+            self.updateSwitch()
+            self.updateDailyTotals()
+        self.model = ClockModel()
+        self.win = tk.Tk()
+        self.win.geometry("300x300+1000+200")
+        self.v = {"switch":tk.StringVar(), "date":tk.StringVar(), "time":tk.StringVar(), "elapsed":tk.StringVar(), "daily":tk.StringVar(), "description":tk.StringVar(), "file":tk.StringVar()}
+        self.w = {}
+        layout = tk.Frame(self.win)
+        menu = tk.Menu(self.win)
+        self.win.config(menu=menu)
+        menu.add_command(label="Load",command=lambda:self.unsavedConfirm("load a new file",self.load))
+        menu.add_command(label="Daily Totals",command=self.displayTotals)
+        menu.add_command(label="Details by Day",command=self.details)
+        tk.Label(layout, textvariable=self.v["file"], anchor="e").grid(row=0, column=0)
+        tk.Label(layout, text="Today's Date", font="Arial 14", anchor="e").grid(row=1, column=0)
+        tk.Label(layout, text="Time of Day", font="Arial 14", anchor="e").grid(row=2, column=0)
+        tk.Label(layout, text="Elapsed Time", font="Arial 14", anchor="e").grid(row=3, column=0)
+        tk.Label(layout, text="Daily Total", font="Arial 14", anchor="e").grid(row=4, column=0)
+        self.w["switch"] = tk.Label(layout, textvariable=self.v["switch"], foreground="red", font="Arial 24", anchor="e")
+        self.w["switch"].grid(row=0, column=1)
+        tk.Label(layout, textvariable=self.v["date"], font="Arial 14", anchor="w").grid(row=1, column=1)
+        tk.Label(layout, textvariable=self.v["time"], font="Arial 14", anchor="w").grid(row=2, column=1)
+        tk.Label(layout, textvariable=self.v["elapsed"], font="Arial 14", anchor="w").grid(row=3, column=1)
+        tk.Label(layout, textvariable=self.v["daily"], font="Arial 14", anchor="w").grid(row=4, column=1)
+        tk.Label(layout, text="Description", font="Arial 14", anchor="w").grid(row=5, column=0, columnspan=2)
+        tk.Entry(layout, textvariable=self.v["description"], font="Arial 12").grid(row=6, column=0, columnspan=2)
+        tk.Button(layout, text="Clear Description", command=lambda:self.v["description"].set("")).grid(row=7, column=0)
+        tk.Button(layout, text="Push Clock", command=self.pushClock).grid(row=7, column=1)
+        tk.Button(layout, text="Cancel Active Record", command=cancelInterval).grid(row=8, column=0)
+        tk.Button(layout, text="Save Records", command=self.model.save).grid(row=8, column=1)
+        self.win.protocol("WM_DELETE_WINDOW", lambda:self.unsavedConfirm("quit",self.win.destroy))
+        self.updateDate()
+        self.updateClock()
+        self.updateSwitch()
+        layout.grid()
+        self.win.mainloop()
+    def pushClock(self):
+        self.model.pushClock(self.v["description"].get())
+        self.updateSwitch()
+        if self.model.on:
+            self.updateElapsed()
+            self.updateDailyTotals()
+        if not hasattr(self.model,"conn"):
+            self.unsavedConfirm("load a new file",self.load)
+    def updateSwitch(self):
+        if self.model.on:
+            self.v["switch"].set("ON")
+            self.w["switch"].config(foreground="green")
+        else:
+            self.v["switch"].set("OFF")
+            self.w["switch"].config(foreground="red")
+            self.updateElapsed()
+    def load(self):
+        entry = tk.StringVar()
+        pop = tk.Toplevel(self.win)
+        pop.geometry("200x100+1050+250")
+        def pushLoad():
+            nonlocal entry, pop
+            self.model.loadDatabase(entry.get()+".db")
+            self.v["file"].set(entry.get()+".db")
+            self.updateDailyTotals()
+            pop.destroy()
+        tk.Entry(pop, textvariable=entry).grid(row=0,column=0,padx=10,pady=10)
+        tk.Button(pop, text="Load", command=pushLoad).grid(row=1,column=0)
+    def updateClock(self):
+        self.v["time"].set(datetime.datetime.today().strftime("%H:%M:%S"))
+        self.win.after(1010-datetime.datetime.today().microsecond//1000, self.updateClock)
+    def updateElapsed(self):
+        if self.model.on:
+            dt = datetime.datetime.today()-self.model.startTime
+            self.v["elapsed"].set(str(24*dt.days+dt.seconds//3600) + ":" + str((dt.seconds//60)%60).zfill(2) + ":" + str(dt.seconds%60).zfill(2))
+            self.win.after(1010-dt.microseconds//1000,self.updateElapsed)
+    def updateDate(self):
+        now = datetime.datetime.today()
+        dt = 1000*(3600*now.hour+60*now.minute+now.second)
+        self.v["date"].set(datetime.datetime.today().strftime("%Y-%m-%d"))
+        self.win.after(86400100-dt,self.updateDate)
+    def updateDailyTotals(self):
+        currInterval = datetime.timedelta(seconds=0)
+        if self.model.on:
+            currInterval = datetime.datetime.today()-self.model.startTime
+        s = int(self.model.dailyTotal + self.model.totalSeconds(currInterval))
+        self.v["daily"].set(str(s//3600) + ":" + str((s//60)%60).zfill(2))
+        if self.model.on:
+            self.win.after(60010-1000*(int(s)%60),self.updateDailyTotals)
+    def displayTotals(self):
+        if hasattr(self.model,"conn"):
+            pop = tk.Toplevel()
+            monthLabel = tk.Label(pop, font="Arial 32")
+            monthlyTotalLabel = tk.Label(pop, font="Arial 8")
+            monthlyAvgLabel = tk.Label(pop, font="Arial 8")
+            calendarLabels = [[j for j in range(7)] for i in range(6)]
+            year = datetime.date.today().year
+            month = datetime.date.today().month
+            monthNames = ("","January", "February", "March", "April","May", "June", "July", "August", "September", "October", "November", "December")
+            def daysPerMonth(month,year=None):
+                if month in (1,3,5,7,8,10,12):
+                    return 31
+                elif month in (4,6,9,11):
+                    return 30
+                elif month == 2 and year is not None and year%4 == 0 and (year%100 != 0 or year%400 == 0):
+                    return 29
+                elif month == 2:
+                    return 28
+            def fillCalendar():
+                monthLabel.config(text=(monthNames[month]+" "+str(year)))
+                first = (datetime.date(year,month,1).weekday()+1)%7
+                dm = daysPerMonth(month,year=year)
+                for i in range(6):
+                    for j in range(7):
+                        d = 7*i+j-first+1
+                        if d >= 1 and d <= daysPerMonth(month,year=year):
+                            calendarLabels[i][j][1].config(text=str(d))
+                            self.model.c.execute("SELECT sum(length) FROM intervals WHERE start BETWEEN ? AND ?", (datetime.datetime(year, month, d, hour=0, minute=0, second=0, microsecond=0), datetime.datetime(year, month, d, hour=23, minute=59, second=59, microsecond=999999)))
+                            daysTotal = 0
+                            r = self.model.c.fetchone()
+                            if r is not None and r[0] is not None:
+                                daysTotal = int(r[0])
+                            daysTotalStr = str(daysTotal//3600) + ":" + str((daysTotal//60)%60).zfill(2) + ":" + str(int(daysTotal)%60).zfill(2)
+                            calendarLabels[i][j][2].config(text=daysTotalStr)
+                        else:
+                            calendarLabels[i][j][1].config(text="")
+                            calendarLabels[i][j][2].config(text="")
+                self.model.c.execute("SELECT sum(length) FROM intervals WHERE start BETWEEN ? AND ?", (datetime.datetime(year, month, 1, hour=0, minute=0, second=0, microsecond=0), datetime.datetime(year, month, dm, hour=23, minute=59, second=59, microsecond=999999)))
+                monthTotal = 0
+                r = self.model.c.fetchone()
+                if r is not None and r[0] is not None:
+                    monthTotal = int(r[0])
+                monthlyTotalLabel.config(text=(str(monthTotal//3600) + ":" + str((monthTotal//60)%60).zfill(2)))
+                monthlyAvgLabel.config(text=(str(monthTotal//(3600*dm)) + ":" + str((monthTotal//(60*dm))%60).zfill(2)))
+            def prevMonth():
+                nonlocal month, year
+                month -= 1
+                if month == 0:
+                    year -= 1
+                    month = 12
+                fillCalendar()
+            def nextMonth():
+                nonlocal month, year
+                month += 1
+                if(month == 13):
+                    year += 1
+                    month = 1
+                fillCalendar()
+            for i in range(6):
+                for j in range(7):
+                    newFrame = tk.Frame(pop)
+                    calendarLabels[i][j] = (newFrame, tk.Label(newFrame,font="Arial 16"), tk.Label(newFrame,font="Arial 12"))
+            tk.Button(pop, text="<", command=prevMonth).grid(row=0, column=0)
+            monthLabel.grid(row=0, column=1, columnspan=5)
+            tk.Button(pop, text=">", command=nextMonth).grid(row=0, column=6)
+            tk.Label(pop, text="Monthly Total:", font="Arial 8").grid(row=1, column=1)
+            monthlyTotalLabel.grid(row=1, column=2)
+            tk.Label(pop, text="Monthly Average:", font="Arial 8").grid(row=1, column=4)
+            monthlyAvgLabel.grid(row=1, column=5)
+            daysOfWeek = ("SUN","MON","TUE","WED","THU","FRI","SAT")
+            for i in range(7):
+                tk.Label(pop, text=daysOfWeek[i], font="Arial 14").grid(row=2, column=i)
+            for i in range(6):
+                for j in range(7):
+                    calendarLabels[i][j][0].grid(row=i+3, column=j)
+                    calendarLabels[i][j][1].grid(row=0, column=0)
+                    calendarLabels[i][j][2].grid(row=1, column=0)
+            fillCalendar()
+        else: self.load()
+    def details(self):
+        if hasattr(self.model,"conn"):
+            date = datetime.date.today()
+            datevar = tk.StringVar()
+            totalVar = tk.StringVar()
+            pop = tk.Toplevel()
+            pop.geometry("400x800+1050+100")
+            detailsFrame = tk.Frame(pop)
+            labels = []
+            def dateString(d):
+                return (datetime.datetime.strptime(d,"%Y-%m-%d %H:%M:%S.%f")).strftime("%H:%M:%S")
+            def secondString(s):
+                return str(int(s//3600)) + ":" + str(int((s//60)%60)).zfill(2) + ":" + str(int(s%60)).zfill(2)
+            def clearLabels():
+                for i in labels:
+                    for j in i:
+                        j.config(text="")
+            def showDay():
+                self.model.c.execute("SELECT i.start,i.end,i.length,d.description FROM intervals i INNER JOIN descriptions d ON d.rowid=i.description WHERE i.start > ? AND i.start < ?", (date, date+datetime.timedelta(days=1)))
+                clearLabels()
+                datevar.set(date.strftime("%Y-%m-%d"))
+                for idx,i in enumerate(self.model.c.fetchall()):
+                    while len(labels) <= idx:
+                        labels.append([tk.Label(detailsFrame), tk.Label(detailsFrame), tk.Label(detailsFrame), tk.Label(detailsFrame)])
+                        for j in range(4):
+                            labels[-1][j].grid(row=idx, column=j)
+                    labels[idx][0].config(text=dateString(i[0]))
+                    labels[idx][1].config(text=dateString(i[1]))
+                    labels[idx][2].config(text=secondString(i[2]))
+                    labels[idx][3].config(text=i[3])
+                self.model.c.execute("SELECT sum(length) FROM intervals WHERE start > ? AND start < ?", (date, date+datetime.timedelta(days=1)))
+                r = self.model.c.fetchone()
+                if r is not None and r[0] is not None:
+                    totalVar.set(secondString(r[0]))
+                else:
+                    totalVar.set("0:00:00")
+            def prevDay():
+                nonlocal date
+                date = date - datetime.timedelta(days=1)
+                showDay()
+            def nextDay():
+                nonlocal date
+                date = date + datetime.timedelta(days=1)
+                showDay()
+            tk.Button(pop, text="<", command=prevDay).grid(row=0, column=0)
+            tk.Label(pop, textvariable=datevar).grid(row=0, column=1)
+            tk.Button(pop, text=">", command=nextDay).grid(row=0, column=2)
+            tk.Label(pop, textvariable=totalVar).grid(row=1, column=1)
+            detailsFrame.grid(row=2, column=0, columnspan=3)
+            showDay()
+    def unsavedConfirm(self,label,f):
+        if self.model.on:
+            messagebox.showinfo("Push Clock","The clock is still running. Please push the clock first to "+label+".")
+        elif len(self.model.intervals) > 0:
+            pop = tk.Toplevel()
+            pop.geometry("200x100+1050+250")
+            def f1():
+                nonlocal f
+                self.model.save()
+                pop.destroy()
+                f()
+            def f2():
+                nonlocal pop
+                pop.destroy()
+            def f3():
+                nonlocal pop, f
+                pop.destroy()
+                f()
+            tk.Label(pop, text="You have unsaved data. Are you sure you want to "+label+"?").grid(row=0, column=0)
+            tk.Button(pop, text="Save and "+label, command=f1).grid(row=1, column=0)
+            tk.Button(pop, text="Resume program", command=f2).grid(row=2, column=0)
+            tk.Button(pop, text=label+" without saving", command=f3).grid(row=3, column=0)
+        else:
+            f()
+        
+ClockView()
